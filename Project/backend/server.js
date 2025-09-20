@@ -7,6 +7,7 @@ import mongoose from 'mongoose';
 import projectModel from './models/project.model.js';
 import { generateResult } from './services/ai.service.js';
 
+
 const port = process.env.PORT || 3000;
 
 
@@ -66,35 +67,57 @@ io.on('connection', socket => {
 
     socket.join(socket.roomId);
 
-    socket.on('project-message', async data => {
+   
 
-        const message = data.message;
-
-        const aiIsPresentInMessage = message.includes('@ai');
-        socket.broadcast.to(socket.roomId).emit('project-message', data)
-
-        if (aiIsPresentInMessage) {
-
-
-            const prompt = message.replace('@ai', '');
-
-            const result = await generateResult(prompt);
-
-
-            io.to(socket.roomId).emit('project-message', {
-                message: result,
-                sender: {
-                    _id: 'ai',
-                    email: 'AI'
-                }
-            })
-
-
-            return
+socket.on('project-message', async data => {
+  const message = data.message;
+  const aiIsPresentInMessage = message.includes('@ai');
+  
+  // Broadcast to other users first
+  socket.broadcast.to(socket.roomId).emit('project-message', data)
+  
+  if (aiIsPresentInMessage) {
+    const prompt = message.replace('@ai', '').trim();
+    
+    if (!prompt) {
+      io.to(socket.roomId).emit('project-message', {
+        message: "Please provide a prompt after @ai (e.g., '@ai create a hello world function')",
+        sender: {
+          _id: 'ai',
+          email: 'AI'
         }
+      });
+      return;
+    }
+    
+    try {
+      console.log('🤖 Processing @ai request:', prompt);
+      const result = await generateResult(prompt);
+      
+      io.to(socket.roomId).emit('project-message', {
+        message: result,
+        sender: {
+          _id: 'ai',
+          email: 'AI'
+        }
+      });
+      
+    } catch (error) {
+      console.error('🚨 AI Socket Error:', error);
+      
+      // Send user-friendly error message
+      io.to(socket.roomId).emit('project-message', {
+        message: "🤖 AI is temporarily unavailable. Please try again in a few moments.",
+        sender: {
+          _id: 'ai',
+          email: 'AI'
+        }
+      });
+    }
+  }
+});
 
 
-    })
 
     socket.on('disconnect', () => {
         console.log('user disconnected');

@@ -3,7 +3,6 @@ import * as projectService from '../services/project.service.js';
 import userModel from '../models/user.model.js';
 import { validationResult } from 'express-validator';
 
-
 export const createProject = async (req, res) => {
 
     const errors = validationResult(req);
@@ -131,3 +130,56 @@ export const updateFileTree = async (req, res) => {
     }
 
 }
+
+export const addCollaboratorByEmail = async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+    }
+
+    try {
+        const { projectId, email } = req.body;
+        
+        // Find the user by email
+        const userToAdd = await userModel.findOne({ email: email.toLowerCase().trim() });
+        if (!userToAdd) {
+            return res.status(404).json({ error: 'User with this email not found. User must register first.' });
+        }
+
+        // Get current logged in user
+        const loggedInUser = await userModel.findOne({ email: req.user.email });
+        
+        // Check if user is already in the project
+        const existingProject = await projectModel.findOne({
+            _id: projectId,
+            users: userToAdd._id
+        });
+        
+        if (existingProject) {
+            return res.status(400).json({ error: 'User is already a collaborator in this project' });
+        }
+
+        // Add user to project
+        const project = await projectService.addUsersToProject({
+            projectId,
+            users: [userToAdd._id.toString()],
+            userId: loggedInUser._id
+        });
+
+        // Return updated project with populated users
+        const updatedProject = await projectModel.findById(projectId).populate('users');
+
+        return res.status(200).json({
+            project: updatedProject,
+            message: `Successfully added ${email} as collaborator`,
+            addedUser: {
+                _id: userToAdd._id,
+                email: userToAdd.email
+            }
+        });
+
+    } catch (err) {
+        console.log('Add collaborator error:', err);
+        res.status(400).json({ error: err.message });
+    }
+};

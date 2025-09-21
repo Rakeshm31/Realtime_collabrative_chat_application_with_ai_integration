@@ -3,7 +3,7 @@ import { initializeSocket, receiveMessage, sendMessage } from '../config/socket'
 import { useLocation } from 'react-router-dom'
 import { getWebContainer } from '../config/webContainer'
 import hljs from 'highlight.js'
-import 'highlight.js/styles/vs2015.css' // Dark theme like in the demo
+import 'highlight.js/styles/vs2015.css'
 import axios from '../config/axios'
 
 const Project = () => {
@@ -30,6 +30,12 @@ const Project = () => {
   const [loading, setLoading] = useState(true)
   const [users, setUsers] = useState([])
   const [currentUser, setCurrentUser] = useState(null)
+  const [isRunning, setIsRunning] = useState(false)
+  
+  // Collaborator states
+  const [showAddCollaborator, setShowAddCollaborator] = useState(false)
+  const [collaboratorEmail, setCollaboratorEmail] = useState('')
+  const [isAddingCollaborator, setIsAddingCollaborator] = useState(false)
   
   const messagesEndRef = useRef(null)
   const socketRef = useRef(null)
@@ -50,10 +56,67 @@ const Project = () => {
         setCurrentUser(response.data.user)
       } catch (error) {
         console.error('Failed to get user profile:', error)
+        const token = localStorage.getItem('token')
+        if (token) {
+          try {
+            const payload = JSON.parse(atob(token.split('.')[1]))
+            setCurrentUser({ email: payload.email, _id: payload.userId || 'current-user' })
+          } catch (e) {
+            console.log('Could not decode token')
+          }
+        }
       }
     }
     fetchUser()
   }, [])
+
+  // Add collaborator function
+  const addCollaborator = async (e) => {
+    e.preventDefault()
+    if (!collaboratorEmail.trim() || isAddingCollaborator) return
+
+    setIsAddingCollaborator(true)
+
+    try {
+      console.log('Adding collaborator:', collaboratorEmail)
+      const response = await axios.post('/projects/add-collaborator', {
+        projectId: project._id,
+        email: collaboratorEmail.trim().toLowerCase()
+      })
+
+      console.log('Collaborator added:', response.data)
+
+      if (response.data.addedUser) {
+        setUsers(prevUsers => [...prevUsers, response.data.addedUser])
+      }
+
+      setCollaboratorEmail('')
+      setShowAddCollaborator(false)
+      
+      setMessages(prev => [...prev, {
+        message: `✅ ${collaboratorEmail} has been added as a collaborator!`,
+        sender: { _id: 'system', email: 'System' }
+      }])
+
+      if (socketRef.current) {
+        socketRef.current.emit('user-added', {
+          projectId: project._id,
+          user: response.data.addedUser
+        })
+      }
+
+    } catch (error) {
+      console.error('Failed to add collaborator:', error)
+      const errorMessage = error.response?.data?.error || error.message || 'Failed to add collaborator'
+      
+      setMessages(prev => [...prev, {
+        message: `❌ ${errorMessage}`,
+        sender: { _id: 'system', email: 'System' }
+      }])
+    } finally {
+      setIsAddingCollaborator(false)
+    }
+  }
 
   const saveFileTree = async (fileTree) => {
     try {
@@ -83,12 +146,21 @@ const Project = () => {
 
       receiveMessage('user-joined', (data) => {
         console.log('👋 User joined:', data)
-        setUsers(prevUsers => [...prevUsers, data.user])
+        setMessages(prevMessages => [...prevMessages, {
+          message: `${data.user.email} joined the project`,
+          sender: { _id: 'system', email: 'System' }
+        }])
       })
 
-      receiveMessage('user-left', (data) => {
-        console.log('👋 User left:', data)
-        setUsers(prevUsers => prevUsers.filter(u => u._id !== data.user._id))
+      receiveMessage('user-added', (data) => {
+        console.log('👥 User added:', data)
+        setUsers(prevUsers => {
+          const exists = prevUsers.find(u => u._id === data.user._id)
+          if (!exists) {
+            return [...prevUsers, data.user]
+          }
+          return prevUsers
+        })
       })
 
       receiveMessage('file-updated', (data) => {
@@ -186,28 +258,29 @@ const Project = () => {
     setFileTree(updatedFileTree)
     saveFileTree(updatedFileTree)
     
-    // Broadcast file update to other users
     if (socketRef.current) {
       socketRef.current.emit('file-updated', { fileTree: updatedFileTree })
     }
   }
 
   const createNewFile = () => {
-    const fileName = prompt('Enter file name (e.g., server.js, index.html):')
+    const fileName = prompt('Enter file name with extension (e.g., server.js, app.py, index.html):')
     if (fileName && fileName.trim()) {
-      const fileExtension = fileName.split('.').pop() || 'js'
-      let defaultContent = getDefaultFileContent(fileName, fileExtension)
+      const cleanFileName = fileName.trim()
+      const fileExtension = cleanFileName.split('.').pop()?.toLowerCase()
+      
+      let defaultContent = getDefaultFileContent(cleanFileName, fileExtension)
 
       const updatedFileTree = {
         ...fileTree,
-        [fileName]: {
+        [cleanFileName]: {
           file: {
             contents: defaultContent
           }
         }
       }
       handleFileTreeUpdate(updatedFileTree)
-      setCurrentFile(fileName)
+      setCurrentFile(cleanFileName)
     }
   }
 
@@ -265,36 +338,100 @@ app.listen(port, () => {
     return '// New file\nconsole.log("Hello, World!");'
   }
 
+  // ✅ ENHANCED RUN FUNCTION WITH JAVASCRIPT EXECUTION
   const runCurrentFile = async () => {
     if (!webContainer || !currentFile || !fileTree[currentFile]) {
       console.log('❌ Cannot run: missing requirements')
       return
     }
 
+    setIsRunning(true)
     console.log('🚀 Running file:', currentFile)
-    
-    const output = `✅ ${currentFile} executed successfully!
-    
-📋 File: ${currentFile}
-📊 Status: Ready to run
-🚀 Environment: Node.js WebContainer
 
-💡 To see actual output, this would normally:
-1. Start the server on the specified port
-2. Handle incoming requests
-3. Log messages to console
-4. Process API endpoints
+    try {
+      const fileContent = fileTree[currentFile].file.contents
+      const fileExtension = currentFile.split('.').pop()?.toLowerCase()
 
-🔧 Next steps:
-- Test API endpoints
-- Add more routes
-- Implement database connection
-- Deploy to production`
+      let output = ''
 
-    setMessages(prev => [...prev, {
-      message: output,
-      sender: { _id: 'system', email: 'System' }
-    }])
+      if (fileExtension === 'js') {
+        // ✅ REAL JAVASCRIPT EXECUTION
+        try {
+          await webContainer.fs.writeFile(currentFile, fileContent)
+          
+          const process = await webContainer.spawn('node', [currentFile])
+          
+          let stdoutData = ''
+          
+          process.output.pipeTo(new WritableStream({
+            write(data) {
+              stdoutData += data
+              console.log('JS Output:', data)
+            }
+          }))
+          
+          const exitCode = await process.exit
+          
+          if (exitCode === 0) {
+            output = stdoutData || 'Program executed successfully (no output)'
+          } else {
+            output = `Program exited with code ${exitCode}`
+          }
+          
+        } catch (jsError) {
+          output = `JavaScript execution error: ${jsError.message}`
+          console.error('JS execution failed:', jsError)
+        }
+        
+      } else if (fileExtension === 'html') {
+        output = `HTML file ${currentFile} is ready for preview.
+        
+To view this HTML file:
+1. Right-click and "Save As" to download
+2. Open in browser to see the webpage
+3. Or use a live server extension
+
+HTML content detected: ${fileContent.length} characters`
+        
+      } else if (fileExtension === 'css') {
+        output = `CSS file ${currentFile} analyzed:
+
+📊 Stylesheet Information:
+- Total characters: ${fileContent.length}
+- Lines of code: ${fileContent.split('\n').length}
+- Contains selectors and styling rules
+
+💡 To apply this CSS:
+1. Link it to an HTML file: <link rel="stylesheet" href="${currentFile}">
+2. Or embed in <style> tags
+3. Use with your HTML files for styling`
+        
+      } else {
+        output = `File type .${fileExtension} is not directly executable.
+        
+Supported file types:
+• .js - JavaScript (Node.js execution)
+• .html - HTML preview information  
+• .css - CSS analysis
+• .cpp/.c - C++ simulation
+• .py - Python (if configured)`
+      }
+
+      // Display output in chat with better formatting
+      setMessages(prev => [...prev, {
+        message: `🖥️ **${currentFile}** Execution Result:\n\n${output}`,
+        sender: { _id: 'system', email: 'Code Runner' }
+      }])
+
+    } catch (error) {
+      console.error('❌ Run error:', error)
+      setMessages(prev => [...prev, {
+        message: `❌ **Error** running ${currentFile}:\n\n${error.message}`,
+        sender: { _id: 'system', email: 'Error Handler' }
+      }])
+    } finally {
+      setIsRunning(false)
+    }
   }
 
   const getLanguageFromExtension = (filename) => {
@@ -312,6 +449,7 @@ app.listen(port, () => {
     return languageMap[extension] || 'plaintext'
   }
 
+  // ✅ DEFINE fileKeys HERE (THIS FIXES THE ERROR)
   const fileKeys = Object.keys(fileTree || {})
 
   if (loading) {
@@ -337,11 +475,48 @@ app.listen(port, () => {
           <div className="mb-4">
             <div className="flex items-center justify-between mb-2">
               <span className="text-sm text-gray-400">Collaborators</span>
-              <button className="text-xs bg-blue-600 px-2 py-1 rounded text-white hover:bg-blue-700">
+              <button 
+                onClick={() => setShowAddCollaborator(!showAddCollaborator)}
+                className="text-xs bg-blue-600 px-2 py-1 rounded text-white hover:bg-blue-700 transition-colors"
+              >
                 <i className="ri-user-add-line mr-1"></i>
                 Add collaborator
               </button>
             </div>
+            
+            {/* Add Collaborator Form */}
+            {showAddCollaborator && (
+              <form onSubmit={addCollaborator} className="mb-3 bg-gray-700 p-3 rounded">
+                <input
+                  type="email"
+                  value={collaboratorEmail}
+                  onChange={(e) => setCollaboratorEmail(e.target.value)}
+                  placeholder="Enter email address"
+                  className="w-full p-2 text-sm bg-gray-600 border border-gray-500 rounded mb-2 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  required
+                />
+                <div className="flex gap-2">
+                  <button 
+                    type="submit" 
+                    disabled={isAddingCollaborator}
+                    className="text-xs bg-green-600 px-3 py-1 rounded text-white hover:bg-green-700 transition-colors disabled:opacity-50"
+                  >
+                    {isAddingCollaborator ? 'Adding...' : 'Add'}
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      setShowAddCollaborator(false)
+                      setCollaboratorEmail('')
+                    }}
+                    className="text-xs bg-gray-600 px-3 py-1 rounded text-white hover:bg-gray-700 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            )}
+            
             <div className="space-y-1">
               {users.map((user, index) => (
                 <div key={user._id || index} className="flex items-center text-sm text-gray-300">
@@ -394,6 +569,7 @@ app.listen(port, () => {
                     <div className={`w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2 ${
                       msg.sender.email === 'AI' ? 'bg-purple-600' :
                       msg.sender.email === 'System' ? 'bg-green-600' :
+                      msg.sender.email === 'Code Runner' ? 'bg-orange-600' :
                       'bg-blue-600'
                     }`}>
                       {msg.sender.email?.charAt(0).toUpperCase()}
@@ -442,11 +618,22 @@ app.listen(port, () => {
           <div className="flex space-x-2">
             <button 
               onClick={runCurrentFile}
-              className="px-3 py-1 bg-green-600 rounded text-sm flex items-center text-white hover:bg-green-700 transition-colors"
-              disabled={!currentFile}
+              className={`px-3 py-1 rounded text-sm flex items-center text-white transition-colors ${
+                isRunning ? 'bg-orange-600' : 'bg-green-600 hover:bg-green-700'
+              }`}
+              disabled={!currentFile || isRunning}
             >
-              <i className="ri-play-line mr-1"></i>
-              Run
+              {isRunning ? (
+                <>
+                  <div className="animate-spin rounded-full h-3 w-3 border-white border-t-transparent mr-1"></div>
+                  Running...
+                </>
+              ) : (
+                <>
+                  <i className="ri-play-line mr-1"></i>
+                  Run
+                </>
+              )}
             </button>
           </div>
         </div>

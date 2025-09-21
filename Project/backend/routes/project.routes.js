@@ -5,37 +5,43 @@ import * as authMiddleWare from '../middleware/auth.middleware.js';
 
 const router = Router();
 
-
 router.post('/create',
     authMiddleWare.authUser,
     body('name').isString().withMessage('Name is required'),
     projectController.createProject
-)
+);
 
 router.get('/all',
     authMiddleWare.authUser,
     projectController.getAllProject
-)
+);
 
 router.put('/add-user',
     authMiddleWare.authUser,
     body('projectId').isString().withMessage('Project ID is required'),
     body('users').isArray({ min: 1 }).withMessage('Users must be an array of strings').bail()
-        .custom((users) => users.every(user => typeof user === 'string')).withMessage('Each user must be a string'),
+    .custom((users) => users.every(user => typeof user === 'string')).withMessage('Each user must be a string'),
     projectController.addUserToProject
-)
+);
+
+// ✅ ADD THIS NEW ROUTE
+router.post('/add-collaborator',
+    authMiddleWare.authUser,
+    body('projectId').isString().withMessage('Project ID is required'),
+    body('email').isEmail().withMessage('Valid email is required'),
+    projectController.addCollaboratorByEmail
+);
 
 router.get('/get-project/:projectId',
     authMiddleWare.authUser,
     projectController.getProjectById
-)
+);
 
 router.put('/update-file-tree',
     authMiddleWare.authUser,
     body('projectId').isString().withMessage('Project ID is required'),
     body('fileTree').isObject().withMessage('File tree is required'),
     projectController.updateFileTree
-)
-
+);
 
 export default router;
